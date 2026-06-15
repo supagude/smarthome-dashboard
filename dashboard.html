@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>智能家居远程控制台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0f1923;color:#e0e0e0;min-height:100vh}
+.header{background:#1a2733;padding:16px 24px;border-bottom:2px solid #00d4aa;display:flex;justify-content:space-between;align-items:center}
+.header h1{font-size:20px;color:#00d4aa}
+.status{font-size:12px;padding:4px 12px;border-radius:12px}
+.online{background:#00d4aa22;color:#00d4aa}
+.offline{background:#f4433622;color:#f44336}
+.container{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;padding:20px}
+.card{background:#1a2733;border-radius:10px;padding:18px;border:1px solid #2a3a4a}
+.card h3{font-size:13px;color:#8899aa;margin-bottom:12px;letter-spacing:1px}
+.env-row{display:flex;justify-content:space-around;text-align:center}
+.env-val{font-size:34px;font-weight:bold;color:#00d4aa}
+.env-label{font-size:12px;color:#667788;margin-top:4px}
+.switch-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #1f2e3a}
+.switch-row:last-child{border:none}
+.toggle{position:relative;width:48px;height:26px}
+.toggle input{display:none}
+.slider{display:block;width:48px;height:26px;background:#2a3a4a;border-radius:26px;cursor:pointer;position:relative;transition:.25s}
+.slider::after{content:"";width:20px;height:20px;background:#8899aa;border-radius:50%;position:absolute;top:3px;left:3px;transition:.25s}
+input:checked+.slider{background:#00d4aa}
+input:checked+.slider::after{transform:translateX(22px);background:#fff}
+.temp-row{display:flex;align-items:center;gap:10px;margin-top:10px}
+.temp-row button{width:36px;height:36px;border:none;border-radius:8px;background:#2a3a4a;color:#00d4aa;font-size:20px;cursor:pointer}
+.temp-row button:active{background:#00d4aa44}
+.temp-val{font-size:30px;font-weight:bold;color:#00d4aa;width:46px;text-align:center}
+.log{background:#0a151d;border-radius:6px;padding:10px;margin:0 20px 20px;height:120px;overflow-y:auto;font:11px monospace;color:#667788}
+.log .tx{color:#ff9800}.log .rx{color:#00d4aa}.log .err{color:#f44336}
+.footer{text-align:center;padding:8px;color:#445566;font-size:11px}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>🏠 智能家居远程控制</h1>
+    <span class="status" id="mqttBadge">连接中</span>
+</div>
+
+<div class="container">
+    <div class="card">
+        <h3>🌡 环境数据</h3>
+        <div class="env-row">
+            <div><div class="env-val" id="temp">--</div><div class="env-label">温度 / ℃</div></div>
+            <div><div class="env-val" id="humi">--</div><div class="env-label">湿度 / %</div></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>❄ 空调</h3>
+        <div class="switch-row">
+            <span style="font-size:14px">电源</span>
+            <label class="toggle"><input type="checkbox" id="acOn" onchange="setBool('ac_on',this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="temp-row">
+            <button onclick="adjTemp(-1)">−</button>
+            <div class="temp-val" id="acTemp">26</div>
+            <button onclick="adjTemp(+1)">+</button>
+            <span style="color:#667788;font-size:12px;margin-left:6px">设定温度</span>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>💡 灯光</h3>
+        <div class="switch-row">
+            <span style="font-size:14px">主灯</span>
+            <label class="toggle"><input type="checkbox" id="mainLight" onchange="setBool('main_light',this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="switch-row">
+            <span style="font-size:14px">小夜灯</span>
+            <label class="toggle"><input type="checkbox" id="nightLight" onchange="setBool('night_light',this.checked)"><span class="slider"></span></label>
+        </div>
+    </div>
+</div>
+
+<div class="log" id="log"></div>
+<div class="footer">远程控制台 · 部署于 GitHub Pages</div>
+
+<script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+<script>
+// ====== 你的 OneNET 配置 (修改这里) ======
+const PRODUCT_ID  = "19MG2h6GbF";
+const DEVICE_NAME = "esp32";
+const TOKEN       = "version=2018-10-31&res=products%2F19MG2h6GbF%2Fdevices%2Fesp32&et=2192672778&method=md5&sign=ZvRA%2FlWfYH3zx98KYmeMEw%3D%3D";
+
+// OneNET MQTT WebSocket
+const WS_URL = "wss://mqtts.heclouds.com:8083/mqtt";
+
+// ====== 主题 ======
+const SUB_TOPIC = "$sys/" + PRODUCT_ID + "/" + DEVICE_NAME + "/thing/property/post";
+const PUB_TOPIC = "$sys/" + PRODUCT_ID + "/" + DEVICE_NAME + "/thing/property/set";
+
+var client;
+var ac_temp = 26;
+var state = {};
+
+// ====== 日志 ======
+function log(msg, cls) {
+    var d = document.getElementById("log");
+    d.innerHTML += '<div class="'+cls+'">['+new Date().toLocaleTimeString()+'] '+msg+'</div>';
+    d.scrollTop = d.scrollHeight;
+}
+
+// ====== 更新界面 ======
+function updateUI() {
+    if (state.temperature !== undefined) document.getElementById("temp").textContent = state.temperature;
+    if (state.humidity !== undefined)    document.getElementById("humi").textContent = state.humidity;
+    if (state.ac_temp !== undefined) {
+        ac_temp = state.ac_temp;
+        document.getElementById("acTemp").textContent = ac_temp;
+    }
+    if (state.ac_on !== undefined)       document.getElementById("acOn").checked = state.ac_on;
+    if (state.main_light !== undefined)  document.getElementById("mainLight").checked = state.main_light;
+    if (state.night_light !== undefined) document.getElementById("nightLight").checked = state.night_light;
+}
+
+// ====== 发送指令 ======
+function sendCmd(params) {
+    if (!client || !client.connected) { log("MQTT 未连接", "err"); return; }
+    var payload = JSON.stringify({ params: params });
+    client.publish(PUB_TOPIC, payload, { qos: 1 });
+    log("发送: " + payload, "tx");
+}
+
+function setBool(name, val) {
+    var p = {}; p[name] = val; sendCmd(p);
+}
+
+function adjTemp(delta) {
+    ac_temp = Math.max(16, Math.min(30, ac_temp + delta));
+    document.getElementById("acTemp").textContent = ac_temp;
+    sendCmd({ ac_temp: ac_temp });
+}
+
+// ====== 连接 OneNET MQTT WebSocket ======
+function connect() {
+    log("正在连接 OneNET...", "rx");
+
+    client = mqtt.connect(WS_URL, {
+        clientId:           DEVICE_NAME + "_web_" + Math.random().toString(16).slice(2, 10),
+        username:           PRODUCT_ID,
+        password:           TOKEN,
+        keepalive:          60,
+        clean:              true,
+        reconnectPeriod:    5000,
+        connectTimeout:     10000
+    });
+
+    client.on("connect", function() {
+        document.getElementById("mqttBadge").className = "status online";
+        document.getElementById("mqttBadge").textContent = "在线";
+        log("OneNET MQTT 已连接 ✓", "rx");
+        client.subscribe(SUB_TOPIC, { qos: 1 }, function(err) {
+            if (err) log("订阅失败: " + err.message, "err");
+            else     log("订阅属性上报", "rx");
+        });
+    });
+
+    client.on("message", function(topic, message) {
+        var msg = message.toString();
+        log("收到: " + msg.substring(0, 100), "rx");
+        try {
+            var j = JSON.parse(msg);
+            if (j.data && j.data.params) {
+                for (var k in j.data.params) state[k] = j.data.params[k].value !== undefined ? j.data.params[k].value : j.data.params[k];
+            }
+            if (j.params) {
+                for (var k in j.params) state[k] = j.params[k].value !== undefined ? j.params[k].value : j.params[k];
+            }
+            updateUI();
+        } catch (e) {}
+    });
+
+    client.on("error", function(err) {
+        log("MQTT 错误: " + err.message, "err");
+    });
+
+    client.on("close", function() {
+        document.getElementById("mqttBadge").className = "status offline";
+        document.getElementById("mqttBadge").textContent = "离线";
+        log("连接断开, 自动重连中...", "err");
+    });
+
+    client.on("offline", function() {
+        document.getElementById("mqttBadge").className = "status offline";
+        document.getElementById("mqttBadge").textContent = "离线";
+    });
+}
+
+// ====== 启动 ======
+connect();
+</script>
+</body>
+</html>
