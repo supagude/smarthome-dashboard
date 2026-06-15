@@ -8,9 +8,6 @@
 body{font-family:'Segoe UI',Arial,sans-serif;background:#0f1923;color:#e0e0e0;min-height:100vh}
 .header{background:#1a2733;padding:16px 24px;border-bottom:2px solid #00d4aa;display:flex;justify-content:space-between;align-items:center}
 .header h1{font-size:20px;color:#00d4aa}
-.status{font-size:12px;padding:4px 12px;border-radius:12px}
-.online{background:#00d4aa22;color:#00d4aa}
-.offline{background:#f4433622;color:#f44336}
 .container{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;padding:20px}
 .card{background:#1a2733;border-radius:10px;padding:18px;border:1px solid #2a3a4a}
 .card h3{font-size:13px;color:#8899aa;margin-bottom:12px;letter-spacing:1px}
@@ -29,16 +26,24 @@ input:checked+.slider::after{transform:translateX(22px);background:#fff}
 .temp-row button{width:36px;height:36px;border:none;border-radius:8px;background:#2a3a4a;color:#00d4aa;font-size:20px;cursor:pointer}
 .temp-row button:active{background:#00d4aa44}
 .temp-val{font-size:30px;font-weight:bold;color:#00d4aa;width:46px;text-align:center}
-.log{background:#0a151d;border-radius:6px;padding:10px;margin:0 20px 20px;height:120px;overflow-y:auto;font:11px monospace;color:#667788}
+.input-row{display:flex;gap:10px;padding:10px 20px;align-items:center}
+.input-row input{flex:1;background:#1a2733;border:1px solid #2a3a4a;color:#e0e0e0;padding:8px 12px;border-radius:6px;font-size:14px}
+.input-row button{background:#00d4aa;color:#0f1923;border:none;padding:8px 16px;border-radius:6px;font-weight:bold;cursor:pointer;font-size:13px}
+.log{background:#0a151d;border-radius:6px;padding:10px;margin:0 20px 20px;height:130px;overflow-y:auto;font:11px monospace;color:#667788}
 .log .tx{color:#ff9800}.log .rx{color:#00d4aa}.log .err{color:#f44336}
 .footer{text-align:center;padding:8px;color:#445566;font-size:11px}
+.note{color:#667788;font-size:12px;padding:0 20px 10px;text-align:center}
 </style>
 </head>
 <body>
 
 <div class="header">
     <h1>🏠 智能家居远程控制</h1>
-    <span class="status" id="mqttBadge">连接中</span>
+</div>
+
+<div class="input-row">
+    <input type="text" id="apiKey" placeholder="粘贴 OneNET Access Key（在控制台→安全→访问密钥中获取）">
+    <button onclick="saveKey()">保存</button>
 </div>
 
 <div class="container">
@@ -77,122 +82,89 @@ input:checked+.slider::after{transform:translateX(22px);background:#fff}
     </div>
 </div>
 
+<div class="note" id="status">请输入 Access Key 后开始</div>
+
 <div class="log" id="log"></div>
-<div class="footer">远程控制台 · 部署于 GitHub Pages</div>
+<div class="footer">远程控制台 · OneNET HTTP API · GitHub Pages</div>
 
-<script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
 <script>
-// ====== 你的 OneNET 配置 (修改这里) ======
-const PRODUCT_ID  = "19MG2h6GbF";
-const DEVICE_NAME = "esp32";
-const TOKEN       = "version=2018-10-31&res=products%2F19MG2h6GbF%2Fdevices%2Fesp32&et=2192672778&method=md5&sign=ZvRA%2FlWfYH3zx98KYmeMEw%3D%3D";
-
-// OneNET MQTT WebSocket
-const WS_URL = "wss://mqtts.heclouds.com:8083/mqtt";
-
-// ====== 主题 ======
-const SUB_TOPIC = "$sys/" + PRODUCT_ID + "/" + DEVICE_NAME + "/thing/property/post";
-const PUB_TOPIC = "$sys/" + PRODUCT_ID + "/" + DEVICE_NAME + "/thing/property/set";
-
-var client;
+var API_KEY = localStorage.getItem("smarthome_key") || "";
+var PRODUCT_ID = "19MG2h6GbF";
+var DEVICE_NAME = "esp32";
+var API_BASE = "https://iot-api.heclouds.com/thingmanager";
 var ac_temp = 26;
-var state = {};
 
-// ====== 日志 ======
+if (API_KEY) document.getElementById("apiKey").value = API_KEY;
+
+function saveKey() {
+    API_KEY = document.getElementById("apiKey").value.trim();
+    localStorage.setItem("smarthome_key", API_KEY);
+    log("Access Key 已保存", "rx");
+    fetchStatus();
+}
+
 function log(msg, cls) {
     var d = document.getElementById("log");
     d.innerHTML += '<div class="'+cls+'">['+new Date().toLocaleTimeString()+'] '+msg+'</div>';
     d.scrollTop = d.scrollHeight;
 }
 
-// ====== 更新界面 ======
-function updateUI() {
-    if (state.temperature !== undefined) document.getElementById("temp").textContent = state.temperature;
-    if (state.humidity !== undefined)    document.getElementById("humi").textContent = state.humidity;
-    if (state.ac_temp !== undefined) {
-        ac_temp = state.ac_temp;
-        document.getElementById("acTemp").textContent = ac_temp;
-    }
-    if (state.ac_on !== undefined)       document.getElementById("acOn").checked = state.ac_on;
-    if (state.main_light !== undefined)  document.getElementById("mainLight").checked = state.main_light;
-    if (state.night_light !== undefined) document.getElementById("nightLight").checked = state.night_light;
+function getHeaders() {
+    return { "Content-Type":"application/json", "authorization": API_KEY };
 }
 
-// ====== 发送指令 ======
+/* 查询设备最新属性值 */
+function fetchStatus() {
+    if (!API_KEY) { document.getElementById("status").textContent="请先输入 Access Key"; return; }
+    document.getElementById("status").textContent = "查询中...";
+
+    var body = JSON.stringify({ product_id: PRODUCT_ID, device_name: DEVICE_NAME });
+
+    fetch(API_BASE + "/query-device-property", { method:"POST", headers:getHeaders(), body:body })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+        document.getElementById("status").textContent = "已连接 OneNET (HTTP API)";
+        if (j.code==0 && j.data) {
+            for (var k in j.data) {
+                var v = j.data[k];
+                if (k=="temperature")  document.getElementById("temp").textContent = v;
+                if (k=="humidity")     document.getElementById("humi").textContent = v;
+                if (k=="ac_temp")      { ac_temp=v; document.getElementById("acTemp").textContent=v; }
+                if (k=="ac_on")        document.getElementById("acOn").checked = v;
+                if (k=="main_light")   document.getElementById("mainLight").checked = v;
+                if (k=="night_light")  document.getElementById("nightLight").checked = v;
+            }
+        }
+    }).catch(function(e){ log("查询失败: "+e.message, "err"); });
+}
+
+/* 下发控制指令 */
 function sendCmd(params) {
-    if (!client || !client.connected) { log("MQTT 未连接", "err"); return; }
-    var payload = JSON.stringify({ params: params });
-    client.publish(PUB_TOPIC, payload, { qos: 1 });
-    log("发送: " + payload, "tx");
+    if (!API_KEY) { log("请先输入 Access Key", "err"); return; }
+
+    var body = JSON.stringify({ product_id:PRODUCT_ID, device_name:DEVICE_NAME, params:params });
+
+    log("发送: " + JSON.stringify(params), "tx");
+
+    fetch(API_BASE + "/set-device-property", { method:"POST", headers:getHeaders(), body:body })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+        if (j.code==0 || j.code=="0") log("指令已送达 ✓", "rx");
+        else log("失败: code="+j.code+" "+JSON.stringify(j.msg||""), "err");
+    }).catch(function(e){ log("发送失败: "+e.message, "err"); });
 }
 
 function setBool(name, val) {
     var p = {}; p[name] = val; sendCmd(p);
 }
-
 function adjTemp(delta) {
     ac_temp = Math.max(16, Math.min(30, ac_temp + delta));
     document.getElementById("acTemp").textContent = ac_temp;
     sendCmd({ ac_temp: ac_temp });
 }
 
-// ====== 连接 OneNET MQTT WebSocket ======
-function connect() {
-    log("正在连接 OneNET...", "rx");
-
-    client = mqtt.connect(WS_URL, {
-        clientId:           DEVICE_NAME + "_web_" + Math.random().toString(16).slice(2, 10),
-        username:           PRODUCT_ID,
-        password:           TOKEN,
-        keepalive:          60,
-        clean:              true,
-        reconnectPeriod:    5000,
-        connectTimeout:     10000
-    });
-
-    client.on("connect", function() {
-        document.getElementById("mqttBadge").className = "status online";
-        document.getElementById("mqttBadge").textContent = "在线";
-        log("OneNET MQTT 已连接 ✓", "rx");
-        client.subscribe(SUB_TOPIC, { qos: 1 }, function(err) {
-            if (err) log("订阅失败: " + err.message, "err");
-            else     log("订阅属性上报", "rx");
-        });
-    });
-
-    client.on("message", function(topic, message) {
-        var msg = message.toString();
-        log("收到: " + msg.substring(0, 100), "rx");
-        try {
-            var j = JSON.parse(msg);
-            if (j.data && j.data.params) {
-                for (var k in j.data.params) state[k] = j.data.params[k].value !== undefined ? j.data.params[k].value : j.data.params[k];
-            }
-            if (j.params) {
-                for (var k in j.params) state[k] = j.params[k].value !== undefined ? j.params[k].value : j.params[k];
-            }
-            updateUI();
-        } catch (e) {}
-    });
-
-    client.on("error", function(err) {
-        log("MQTT 错误: " + err.message, "err");
-    });
-
-    client.on("close", function() {
-        document.getElementById("mqttBadge").className = "status offline";
-        document.getElementById("mqttBadge").textContent = "离线";
-        log("连接断开, 自动重连中...", "err");
-    });
-
-    client.on("offline", function() {
-        document.getElementById("mqttBadge").className = "status offline";
-        document.getElementById("mqttBadge").textContent = "离线";
-    });
-}
-
-// ====== 启动 ======
-connect();
+setInterval(fetchStatus, 3000);
+fetchStatus();
 </script>
 </body>
 </html>
